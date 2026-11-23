@@ -110,6 +110,21 @@ async function translate(text, from) {
   }
 }
 
+// Accurate final translation: Claude (Supabase edge function) understands PR accent, slang and
+// mis-heard words. Falls back to the Google result if it fails or takes over 6 seconds.
+const SMART_URL = 'https://cbzibwwplygnzmvexfrf.supabase.co/functions/v1/translate';
+const recentSpanish = [];
+async function smartTranslate(text, alts) {
+  const ctl = new AbortController(); const to = setTimeout(() => ctl.abort(), 6000);
+  try {
+    const r = await fetch(SMART_URL, { method: 'POST', headers: { 'content-type': 'application/json' }, signal: ctl.signal,
+      body: JSON.stringify({ text, alts, context: recentSpanish.slice(-3) }) });
+    const j = await r.json();
+    if (!r.ok || !j.english) throw new Error(j.error || 'failed');
+    return j.english;
+  } finally { clearTimeout(to); }
+}
+
 function setEnglish(t) { eng.textContent = t; eng.classList.remove('empty'); }
 
 function start() {
@@ -118,16 +133,19 @@ function start() {
   rec.lang = (langSel.value === 'es-PR' && langFallback) ? langFallback : langSel.value;
   rec.interimResults = true;
   rec.continuous = false;
-  rec.maxAlternatives = 1;
-  let finalText = '', lastInterimTranslated = '', timer = null;
+  rec.maxAlternatives = 3;
+  let finalText = '', finalAlts = [], lastInterimTranslated = '', timer = null;
 
   rec.onstart = () => { listening = true; mic.classList.add('on'); mic.textContent = 'Stop'; status.textContent = 'Listening…'; heard.textContent = ''; };
   rec.onresult = e => {
     let interim = '';
-    finalText = '';
+    finalText = ''; finalAlts = ['', ''];
     for (let i = 0; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalText += t; else interim += t;
+      const res = e.results[i], t = res[0].transcript;
+      if (res.isFinal) {
+        finalText += t;
+        for (let k = 1; k <= 2; k++) finalAlts[k - 1] += (res[k] || res[0]).transcript;
+      } else interim += t;
     }
     heard.textContent = finalText + interim;
     // Live preview: translate partial speech every ~600ms while talking.
@@ -153,16 +171,25 @@ function start() {
     const text = (finalText || heard.textContent).trim();
     if (!text) return;
     status.textContent = 'Translating…';
-    const mine = ++seq;
-    try {
-      const en = await translate(text, langSel.value);
-      if (mine !== seq) return;
-      setEnglish(en); status.textContent = '';
-      const d = document.createElement('div'); d.className = 'h';
-      d.innerHTML = '<b></b><span></span>'; d.firstChild.textContent = en; d.lastChild.textContent = text;
-      hist.prepend(d);
-      if (speakOn) { const u = new SpeechSynthesisUtterance(en); u.lang = 'en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }
-    } catch (e) { status.textContent = 'Translation failed. Check your connection.'; }
+    const mine = ++seq, lang = langSel.value;
+    const alts = [...new Set(finalAlts.map(a => a.trim()))].filter(a => a && a !== text);
+    // Fast result first (Google), then the accurate one (Claude) replaces it for Spanish.
+    const quick = translate(text, lang).catch(() => null);
+    const smart = lang.startsWith('es') ? smartTranslate(text, alts).catch(() => null) : Promise.resolve(null);
+    const q = await quick;
+    if (mine !== seq) return;
+    if (q) { setEnglish(q); }
+    if (lang.startsWith('es')) status.textContent = 'Improving…';
+    const s = await smart;
+    if (mine !== seq) return;
+    const en = s || q;
+    if (!en) { status.textContent = 'Translation failed. Check your connection.'; return; }
+    setEnglish(en); status.textContent = '';
+    recentSpanish.push(text); if (recentSpanish.length > 5) recentSpanish.shift();
+    const d = document.createElement('div'); d.className = 'h';
+    d.innerHTML = '<b></b><span></span>'; d.firstChild.textContent = en; d.lastChild.textContent = text;
+    hist.prepend(d);
+    if (speakOn) { const u = new SpeechSynthesisUtterance(en); u.lang = 'en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }
   };
   status.textContent = 'Starting mic… if the browser asks, tap Allow.';
   try { rec.start(); } catch (e) { status.textContent = 'Could not start the mic: ' + e.message; }
