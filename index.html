@@ -34,6 +34,7 @@
 <body>
 <header>
   <select id="lang" aria-label="Language you are listening to">
+    <option value="es-PR">Spanish (Puerto Rico)</option>
     <option value="es-ES">Spanish (Spain)</option>
     <option value="es-MX">Spanish (Latin America)</option>
     <option value="pt-BR">Portuguese</option>
@@ -65,13 +66,37 @@
 const $ = id => document.getElementById(id);
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 const mic = $('mic'), eng = $('english'), heard = $('heard'), status = $('status'), hist = $('hist'), langSel = $('lang');
-let rec = null, listening = false, speakOn = false, seq = 0;
+let rec = null, listening = false, speakOn = false, seq = 0, langFallback = null;
 
 try { const s = localStorage.getItem('lang'); if (s) langSel.value = s; } catch(e){}
 langSel.onchange = () => { try { localStorage.setItem('lang', langSel.value); } catch(e){} if (listening) stop(); };
 
+// Puerto Rican / Caribbean Spanish -> standard Spanish, applied before translating.
+// Each entry fixes a phrase Google Translate got wrong in testing (2026-11-22).
+// Whole-word match that works with accented letters (plain \b does not).
+const W = src => new RegExp('(?<!\\p{L})(?:' + src + ')(?!\\p{L})', 'giu');
+const PR_FIXES = [
+  [W('jugo de china'), 'jugo de naranja'], [W('una china'), 'una naranja'], [W('chinas'), 'naranjas'],
+  [W('chavos'), 'dinero'],
+  [W('corillo'), 'grupo de amigos'],
+  [W('pichear'), 'ignorar'], [W('pichea'), 'ignora'], [W('picheó'), 'ignoró'], [W('picheando'), 'ignorando'], [W('me piché'), 'ignoré'],
+  [W('revolú'), 'desorden'],
+  [W('pon'), 'aventón'],
+  [W('brutal'), 'genial'],
+  [W('nítido|nítida'), 'excelente'],
+  [W('wepa'), '¡qué bien!'],
+  [W('ay bendito'), 'ay, qué pena'],
+  [W('acho'), 'hombre'],
+  [W('toy'), 'estoy'], [W('tamo'), 'estamos'], [W('vamo'), 'vamos'],
+  [W("pa'?"), 'para'], [W("na'"), 'nada'],
+  // dropped "d": cansao -> cansado (skip real -ao words)
+  [W('(?!bacalao|cacao|callao)(\\p{L}+)ao'), '$1ado'],
+];
+function normalizeSpanish(t) { for (const [re, rep] of PR_FIXES) t = t.replace(re, rep); return t; }
+
 async function translate(text, from) {
   const sl = from.split('-')[0];
+  if (sl === 'es') text = normalizeSpanish(text);
   try {
     const r = await fetch('https://translate.googleapis.com/translate_a/single?client=gtx&sl=' + sl + '&tl=en&dt=t&q=' + encodeURIComponent(text));
     if (!r.ok) throw 0;
@@ -90,7 +115,7 @@ function setEnglish(t) { eng.textContent = t; eng.classList.remove('empty'); }
 function start() {
   if (!SR) { status.textContent = 'This browser has no speech recognition. Use Chrome or Safari.'; return; }
   rec = new SR();
-  rec.lang = langSel.value;
+  rec.lang = (langSel.value === 'es-PR' && langFallback) ? langFallback : langSel.value;
   rec.interimResults = true;
   rec.continuous = false;
   rec.maxAlternatives = 1;
@@ -117,6 +142,8 @@ function start() {
     }
   };
   rec.onerror = e => {
+    // Some browsers (likely iPhone Safari) may not know es-PR: fall back to US Spanish.
+    if (e.error === 'language-not-supported' && rec.lang === 'es-PR') { rec.onend = null; rec = null; listening = false; langFallback = 'es-US'; start(); return; }
     const msg = { 'not-allowed': 'Microphone blocked. Allow it in the browser address bar.', 'no-speech': 'Heard nothing. Tap and try again.', 'audio-capture': 'No microphone found.', 'network': 'Speech service needs internet.' };
     status.textContent = msg[e.error] || ('Error: ' + e.error);
   };
