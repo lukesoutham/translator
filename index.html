@@ -28,6 +28,8 @@
   .h b{display:block;font-weight:500;font-size:17px}
   .h span{color:var(--mute);font-size:14px}
   .tools{display:flex;gap:8px;flex:none}
+  #box{width:100%;background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:12px 14px;font:16px/1.4 inherit;font-family:inherit;resize:none;margin-bottom:12px}
+  #box::placeholder{color:var(--mute)}
   button.sm{background:var(--card);color:var(--ink);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:14px;cursor:pointer;white-space:nowrap}
 </style>
 </head>
@@ -60,6 +62,7 @@
 </div>
 
 <div id="btnwrap"><button id="mic">Listen</button></div>
+<textarea id="box" rows="2" placeholder="Or dictate here with Wispr (tap, then use Wispr). Translates automatically." aria-label="Dictation box"></textarea>
 <div id="hist"></div>
 
 <script>
@@ -170,9 +173,17 @@ function start() {
     if (timer) { clearTimeout(timer); timer = null; }
     const text = (finalText || heard.textContent).trim();
     if (!text) return;
+    const alts = [...new Set(finalAlts.map(a => a.trim()))].filter(a => a && a !== text);
+    await translateLine(text, alts);
+  };
+  status.textContent = 'Starting mic… if the browser asks, tap Allow.';
+  try { rec.start(); } catch (e) { status.textContent = 'Could not start the mic: ' + e.message; }
+}
+function stop() { if (rec) rec.stop(); }
+
+async function translateLine(text, alts) {
     status.textContent = 'Translating…';
     const mine = ++seq, lang = langSel.value;
-    const alts = [...new Set(finalAlts.map(a => a.trim()))].filter(a => a && a !== text);
     // Fast result first (Google), then the accurate one (Claude) replaces it for Spanish.
     const quick = translate(text, lang).catch(() => null);
     const smart = lang.startsWith('es') ? smartTranslate(text, alts).catch(() => null) : Promise.resolve(null);
@@ -190,11 +201,22 @@ function start() {
     d.innerHTML = '<b></b><span></span>'; d.firstChild.textContent = en; d.lastChild.textContent = text;
     hist.prepend(d);
     if (speakOn) { const u = new SpeechSynthesisUtterance(en); u.lang = 'en-US'; speechSynthesis.cancel(); speechSynthesis.speak(u); }
-  };
-  status.textContent = 'Starting mic… if the browser asks, tap Allow.';
-  try { rec.start(); } catch (e) { status.textContent = 'Could not start the mic: ' + e.message; }
 }
-function stop() { if (rec) rec.stop(); }
+
+// Wispr Flow (or any dictation keyboard) types into this box. Translate as soon as text
+// lands, then empty the box so the next dictation starts fresh.
+const box = $('box');
+let boxTimer = null;
+box.addEventListener('input', () => {
+  clearTimeout(boxTimer);
+  boxTimer = setTimeout(async () => {
+    const t = box.value.trim();
+    if (!t) return;
+    heard.textContent = t;
+    box.value = '';
+    await translateLine(t, []);
+  }, 700);
+});
 
 mic.onclick = () => listening ? stop() : start();
 $('speak').onclick = e => { speakOn = !speakOn; e.target.textContent = 'Voice: ' + (speakOn ? 'on' : 'off'); };
